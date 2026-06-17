@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import difflib
 import json
 import os
 import subprocess
@@ -26,14 +28,40 @@ def active_scenario() -> Scenario:
     return get_scenario(os.environ.get("SRE_SCENARIO"))
 
 
+def is_path_within(target: Path, root: Path) -> bool:
+    """目标路径解析后必须位于指定根目录内。"""
+    try:
+        target.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def subprocess_text(value: str | bytes | None) -> str:
+    """将 subprocess 输出统一转换为可序列化字符串。"""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def normalize_repo_path(file_path: str, repo_dir: Path) -> str:
     normalized = file_path.replace("\\", "/").lstrip("/")
-    repo_prefix = str(repo_dir.relative_to(PROJECT_ROOT)).replace("\\", "/") + "/"
-    if normalized.startswith(repo_prefix):
+
+    try:
+        repo_prefix = str(repo_dir.relative_to(PROJECT_ROOT)).replace("\\", "/") + "/"
+    except ValueError:
+        # pytest 的临时目录可能不在 PROJECT_ROOT 下
+        repo_prefix = ""
+
+    if repo_prefix and normalized.startswith(repo_prefix):
         normalized = normalized[len(repo_prefix) :]
+
     legacy = "fixtures/repo/"
     if normalized.startswith(legacy):
         normalized = normalized[len(legacy) :]
+
     return normalized
 
 
@@ -128,7 +156,7 @@ def read_source(
     sc = active_scenario()
     rel = normalize_repo_path(file_path, sc.repo_dir)
     target = (sc.repo_dir / rel).resolve()
-    if not str(target).startswith(str(sc.repo_dir.resolve())):
+    if not is_path_within(target, sc.repo_dir):
         return json.dumps({"error": "Path traversal not allowed"}, ensure_ascii=False)
 
     if not target.exists():
@@ -156,18 +184,27 @@ def apply_patch(
     search: str = Field(description="Exact code snippet to find"),
     replace: str = Field(description="Replacement snippet"),
 ) -> str:
-    """Apply a targeted code patch in the active scenario repository."""
+    """Apply one auditable, syntax-checked patch."""
     sc = active_scenario()
     rel = normalize_repo_path(file_path, sc.repo_dir)
     target = (sc.repo_dir / rel).resolve()
-    if not str(target).startswith(str(sc.repo_dir.resolve())):
-        return json.dumps({"error": "Path traversal not allowed"}, ensure_ascii=False)
 
-    if not target.exists():
+    if not is_path_within(target, sc.repo_dir):
+        return json.dumps(
+            {
+                "scenario": sc.name,
+                "status": "rejected",
+                "error": "Path traversal not allowed",
+            },
+            ensure_ascii=False,
+        )
+
+    if not target.exists() or not target.is_file():
         available = [p.name for p in sc.repo_dir.glob("*.py")]
         return json.dumps(
             {
                 "scenario": sc.name,
+                "status": "rejected",
                 "error": f"File not found: {file_path}",
                 "use_path_like": sc.primary_source,
                 "available": available,
@@ -175,10 +212,25 @@ def apply_patch(
             ensure_ascii=False,
         )
 
-    original = target.read_text(encoding="utf-8")
-    if search not in original:
+    if not search:
         return json.dumps(
             {
+                "scenario": sc.name,
+                "status": "rejected",
+                "error": "Search snippet must not be empty",
+                "file": rel,
+            },
+            ensure_ascii=False,
+        )
+
+    original = target.read_text(encoding="utf-8")
+    match_count = original.count(search)
+
+    if match_count == 0:
+        return json.dumps(
+            {
+                "scenario": sc.name,
+                "status": "rejected",
                 "error": "Search snippet not found in file",
                 "file": rel,
                 "hint": "Call read_source first for exact content",
@@ -186,49 +238,157 @@ def apply_patch(
             ensure_ascii=False,
         )
 
+    if match_count > 1:
+        return json.dumps(
+            {
+                "scenario": sc.name,
+                "status": "rejected",
+                "error": "Search snippet is ambiguous",
+                "file": rel,
+                "match_count": match_count,
+                "hint": "Provide a longer, unique snippet",
+            },
+            ensure_ascii=False,
+        )
+
     updated = original.replace(search, replace, 1)
-    target.write_text(updated, encoding="utf-8")
+
+    if target.suffix == ".py":
+        try:
+            ast.parse(updated, filename=rel)
+        except SyntaxError as exc:
+            return json.dumps(
+                {
+                    "scenario": sc.name,
+                    "status": "rejected",
+                    "error": "Patch introduces invalid Python syntax",
+                    "file": rel,
+                    "line": exc.lineno,
+                    "offset": exc.offset,
+                    "detail": exc.msg,
+                },
+                ensure_ascii=False,
+            )
+
+    diff = "\n".join(
+        difflib.unified_diff(
+            original.splitlines(),
+            updated.splitlines(),
+            fromfile=f"a/{rel}",
+            tofile=f"b/{rel}",
+            lineterm="",
+        )
+    )
+
+    temp_path = target.with_name(f".{target.name}.tmp")
+    try:
+        temp_path.write_text(updated, encoding="utf-8")
+        os.replace(temp_path, target)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
     return json.dumps(
-        {"scenario": sc.name, "status": "patched", "file": rel, "bytes_changed": len(updated) - len(original)},
+        {
+            "scenario": sc.name,
+            "status": "patched",
+            "file": rel,
+            "match_count": match_count,
+            "bytes_changed": len(updated.encode("utf-8")) - len(original.encode("utf-8")),
+            "diff": diff,
+        },
         ensure_ascii=False,
+        indent=2,
     )
 
 
 @mcp.tool()
 def run_tests(
-    test_path: str = Field(default="", description="Pytest path relative to project root (empty = scenario default)"),
+    test_path: str = Field(
+        default="",
+        description="Pytest path relative to project root (empty = scenario default)",
+    ),
 ) -> str:
-    """Run pytest to verify the fix for the active scenario."""
+    """Run an allow-listed pytest target and always return structured output."""
     sc = active_scenario()
-    target = test_path or sc.test_path
-    allowed = sc.allowed_test_paths
+    target = (test_path or sc.test_path).replace("\\", "/")
+    allowed = {path.replace("\\", "/") for path in sc.allowed_test_paths}
 
     if target not in allowed:
         return json.dumps(
             {
                 "scenario": sc.name,
+                "test_path": target,
+                "passed": False,
                 "error": "Test path not allowed",
+                "error_type": "ValidationError",
                 "allowed_paths": sorted(allowed),
                 "default": sc.test_path,
             },
             ensure_ascii=False,
         )
 
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", target, "-v", "--tb=short", "-q"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        stdin=subprocess.DEVNULL,
-    )
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        target,
+        "-v",
+        "--tb=short",
+        "-q",
+    ]
+
+    try:
+        result = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+
+    except subprocess.TimeoutExpired as exc:
+        return json.dumps(
+            {
+                "scenario": sc.name,
+                "test_path": target,
+                "command": command,
+                "exit_code": None,
+                "passed": False,
+                "timed_out": True,
+                "error_type": "TimeoutExpired",
+                "error": "Pytest exceeded the 60-second timeout",
+                "stdout": subprocess_text(exc.stdout),
+                "stderr": subprocess_text(exc.stderr),
+            },
+            ensure_ascii=False,
+        )
+
+    except OSError as exc:
+        return json.dumps(
+            {
+                "scenario": sc.name,
+                "test_path": target,
+                "command": command,
+                "exit_code": None,
+                "passed": False,
+                "timed_out": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "stdout": "",
+                "stderr": "",
+            },
+            ensure_ascii=False,
+        )
 
     return json.dumps(
         {
             "scenario": sc.name,
             "test_path": target,
+            "command": command,
             "exit_code": result.returncode,
             "passed": result.returncode == 0,
+            "timed_out": False,
             "stdout": result.stdout,
             "stderr": result.stderr,
         },
