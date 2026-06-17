@@ -1,0 +1,16 @@
+[
+  {
+    "commit": "a3f91c2",
+    "author": "dev_zhang",
+    "hours_ago": 2,
+    "message": "refactor: simplify active user query loop",
+    "files": ["fixtures/repo/db_query.py"]
+  },
+  {
+    "commit": "b7e2041",
+    "author": "dev_li",
+    "hours_ago": 8,
+    "message": "chore: update dependencies",
+    "files": ["requirements.txt"]
+  }
+]

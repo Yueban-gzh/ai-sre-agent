@@ -1,0 +1,11 @@
+2026-06-17 03:11:58 WARN  [db-pool] Connection pool utilization at 72% (threshold 70%)
+2026-06-17 03:12:01 ERROR [api] HTTP 500 on GET /api/users/active
+2026-06-17 03:12:01 ERROR [db] Database query failed for endpoint /api/users/active
+2026-06-17 03:12:01 ERROR [db] Traceback (most recent call last):
+  File "fixtures/repo/db_query.py", line 18, in get_active_users
+    return [users[i] for i in range(len(users) + 1)]
+            ~~~~~^^^
+IndexError: list index out of range
+2026-06-17 03:12:02 ERROR [api] HTTP 500 on GET /api/users/active
+2026-06-17 03:12:03 ERROR [api] HTTP 500 on GET /api/users/active
+2026-06-17 03:12:05 WARN  [monitor] 500 error rate spike: 42 req/min (baseline: 2 req/min)

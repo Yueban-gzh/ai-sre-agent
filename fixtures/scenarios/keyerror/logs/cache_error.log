@@ -1,0 +1,10 @@
+2026-06-18 14:28:01 WARN  [redis] Cache hit rate dropped to 61% (baseline 89%)
+2026-06-18 14:30:02 ERROR [api] HTTP 500 on GET /api/users/1/tier
+2026-06-18 14:30:02 ERROR [cache] Tier lookup failed for user_id=1
+2026-06-18 14:30:02 ERROR [cache] Traceback (most recent call last):
+  File "fixtures/scenarios/keyerror/repo/user_cache.py", line 12, in get_user_tier
+    return PROFILES[user_id]["tier"]
+           ~~~~~~~~^^^^^^^^^
+KeyError: 1
+2026-06-18 14:30:03 ERROR [api] HTTP 500 on GET /api/users/2/tier
+2026-06-18 14:30:05 WARN  [monitor] 500 error rate spike: 28 req/min (baseline 1 req/min)

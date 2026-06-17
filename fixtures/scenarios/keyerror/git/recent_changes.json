@@ -1,0 +1,16 @@
+[
+  {
+    "commit": "c8d41e0",
+    "author": "dev_wang",
+    "hours_ago": 3,
+    "message": "refactor: migrate profile cache keys from int to str",
+    "files": ["fixtures/scenarios/keyerror/repo/user_cache.py"]
+  },
+  {
+    "commit": "f2a109b",
+    "author": "dev_chen",
+    "hours_ago": 12,
+    "message": "chore: bump redis client version",
+    "files": ["requirements.txt"]
+  }
+]
