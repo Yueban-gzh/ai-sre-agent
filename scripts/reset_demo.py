@@ -39,15 +39,20 @@ def get_user_tier(user_id: int) -> str:
 
 
 def reset_scenario(scenario: Scenario | str | None = None) -> Scenario:
-    sc = get_scenario(scenario if isinstance(scenario, str) else None)
+    sc = scenario if isinstance(scenario, Scenario) else get_scenario(scenario)
     sources = BUGGY_SOURCES[sc.name]
 
     for rel_path, content in sources.items():
         target = sc.repo_dir / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        rel = target.relative_to(PROJECT_ROOT)
-        print(f"[RESET] [{sc.name}] Restored: {rel}")
+
+        try:
+            display_path = target.relative_to(PROJECT_ROOT)
+        except ValueError:
+            display_path = target
+
+        print(f"[RESET] [{sc.name}] Restored: {display_path}")
 
     return sc
 
