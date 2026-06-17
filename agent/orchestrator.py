@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from agent.llm_client import LLMClient
 from agent.mcp_client import MCPClient
 from agent.scenario import Scenario, get_scenario
+from agent.trace_utils import (
+    redact_data,
+    summarize_tool_result,
+    utc_now_iso,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = PROJECT_ROOT / "prompts"
@@ -18,9 +24,10 @@ MAX_REFLEXION_ROUNDS = 3
 
 TOOL_PHASES: dict[str, str] = {
     "read_logs": "ASSESS",
-    "git_recent_changes": "ASSESS",
+    "git_recent_changes": "INVESTIGATE",
     "query_runbook": "INVESTIGATE",
     "read_source": "INVESTIGATE",
+    "list_scenario_info": "ASSESS",
     "apply_patch": "REMEDIATE",
     "run_tests": "VERIFY",
 }
@@ -70,7 +77,10 @@ class IncidentOrchestrator:
         ]
 
     async def _execute_tool_calls(
-        self, tool_calls: list[dict[str, Any]], assistant_content: str | None = None
+        self,
+        tool_calls: list[dict[str, Any]],
+        turn: int,
+        assistant_content: str | None = None,
     ) -> list[dict[str, Any]]:
         """Execute tool calls via MCP and return OpenAI-style tool messages."""
         tool_messages: list[dict[str, Any]] = []
@@ -101,24 +111,61 @@ class IncidentOrchestrator:
         for call in tool_calls:
             name = call["name"]
             args = call["arguments"]
-            phase = TOOL_PHASES.get(name, "UNKNOWN")
-            if phase not in self.phases_seen:
-                self.phases_seen.append(phase)
-            print(f"\n[PHASE:{phase}] [TOOL] {name}({json.dumps(args, ensure_ascii=False)})")
+            current_phase = TOOL_PHASES.get(name, "UNKNOWN")
+            if current_phase not in self.phases_seen:
+                self.phases_seen.append(current_phase)
+            print(
+                f"\n[PHASE:{current_phase}] [TOOL] "
+                f"{name}({json.dumps(args, ensure_ascii=False)})"
+            )
 
-            result = await self.mcp.call_tool(name, args)
+            tool_started_at = utc_now_iso()
+            tool_started = perf_counter()
+
+            try:
+                result = await self.mcp.call_tool(name, args)
+
+                tool_record = {
+                    "sequence": len(self.tool_call_log) + 1,
+                    "turn": turn,
+                    "phase": current_phase,
+                    "tool": name,
+                    "arguments": redact_data(args),
+                    "started_at": tool_started_at,
+                    "duration_ms": round(
+                        (perf_counter() - tool_started) * 1000,
+                        2,
+                    ),
+                    "status": "completed",
+                    "result_summary": summarize_tool_result(name, result),
+                }
+
+            except Exception as exc:
+                tool_record = {
+                    "sequence": len(self.tool_call_log) + 1,
+                    "turn": turn,
+                    "phase": current_phase,
+                    "tool": name,
+                    "arguments": redact_data(args),
+                    "started_at": tool_started_at,
+                    "duration_ms": round(
+                        (perf_counter() - tool_started) * 1000,
+                        2,
+                    ),
+                    "status": "error",
+                    "result_summary": {
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                }
+
+                self.tool_call_log.append(tool_record)
+                raise
+
+            self.tool_call_log.append(tool_record)
+
             compacted = compact_tool_result(name, result)
             print(f"[RESULT] {compacted[:500]}{'...' if len(compacted) > 500 else ''}")
-
-            parsed_for_log = parse_tool_result(result) if name == "run_tests" else None
-            self.tool_call_log.append(
-                {
-                    "tool": name,
-                    "arguments": args,
-                    "result_preview": compacted[:300],
-                    "passed": parsed_for_log.get("passed") if parsed_for_log else None,
-                }
-            )
 
             tool_messages.append(
                 {
@@ -167,7 +214,9 @@ class IncidentOrchestrator:
 
             if response["tool_calls"]:
                 await self._execute_tool_calls(
-                    response["tool_calls"], assistant_content=response.get("content")
+                    response["tool_calls"],
+                    turn,
+                    assistant_content=response.get("content"),
                 )
                 if self._incident_resolved():
                     print("\n[DONE] Tests passed — generating incident report...")
@@ -216,8 +265,8 @@ class IncidentOrchestrator:
     def _incident_resolved(self) -> bool:
         for entry in reversed(self.tool_call_log):
             if entry["tool"] == "run_tests":
-                if entry.get("passed") is not None:
-                    return entry["passed"]
-                parsed = parse_tool_result(entry.get("result_preview", "{}"))
-                return parsed.get("passed", False)
+                summary = entry.get("result_summary", {})
+                passed = summary.get("passed")
+                if passed is not None:
+                    return passed
         return False

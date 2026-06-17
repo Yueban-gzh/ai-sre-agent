@@ -28,6 +28,11 @@ from agent.llm_client import LLMClient  # noqa: E402
 from agent.mcp_client import connect_mcp  # noqa: E402
 from agent.orchestrator import IncidentOrchestrator  # noqa: E402
 from agent.scenario import SCENARIOS, get_scenario  # noqa: E402
+from agent.trace_utils import (  # noqa: E402
+    build_verification_summary,
+    redact_data,
+    utc_now_iso,
+)
 from scripts.prepare_reflexion_demo import prepare_failed_hotfix  # noqa: E402
 from scripts.reset_demo import reset_scenario  # noqa: E402
 
@@ -71,17 +76,27 @@ def export_trace(
         else scenario_name
     )
     trace_path = runs_dir / f"trace_{trace_label}_{timestamp}.json"
+
+    verification = build_verification_summary(result["tool_calls"])
+
     payload = {
+        "trace_version": 2,
+        "created_at": utc_now_iso(),
         "timestamp": timestamp,
         "scenario": scenario_name,
         "run_mode": run_mode,
         "model": llm_model,
+        "success": verification["final_passed"] is True,
         "turns": result["turns"],
         "reflexion_rounds": result["reflexion_rounds"],
-        "tool_calls": result["tool_calls"],
-        "tools_used": list({c["tool"] for c in result["tool_calls"]}),
+        "tool_call_count": len(result["tool_calls"]),
+        "tool_calls": redact_data(result["tool_calls"]),
+        "tools_used": sorted({call["tool"] for call in result["tool_calls"]}),
         "phases": result.get("phases", []),
-        "final_report_preview": (result.get("final_report") or "")[:500],
+        "verification": verification,
+        "final_report_preview": redact_data(
+            (result.get("final_report") or "")[:1200]
+        ),
     }
     trace_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return trace_path
