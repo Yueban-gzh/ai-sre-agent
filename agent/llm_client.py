@@ -36,6 +36,7 @@ class LLMClient:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
+            "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0")),
         }
         if tools:
             kwargs["tools"] = tools
